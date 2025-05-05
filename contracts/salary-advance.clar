@@ -267,3 +267,82 @@
     )
   )
 )
+
+
+(define-map advance-history
+  { employee: principal, advance-id: uint }
+  {
+    amount: uint,
+    timestamp: uint,
+    repaid: bool,
+    due-date: uint,
+    repayment-date: uint
+  }
+)
+
+(define-data-var advance-counter uint u0)
+
+
+(define-public (record-advance-history (employee principal) (amount uint) (due-date uint))
+  (let
+    (
+      (current-counter (var-get advance-counter))
+      (new-counter (+ current-counter u1))
+    )
+    (map-set advance-history 
+      { employee: employee, advance-id: new-counter } 
+      {
+        amount: amount,
+        timestamp: stacks-block-height,
+        repaid: false,
+        due-date: due-date,
+        repayment-date: u0
+      }
+    )
+    (var-set advance-counter new-counter)
+    (ok true)
+  )
+)
+(define-public (update-repayment-date (employee principal) (advance-id uint) (repayment-date uint))
+  (let
+    (
+      (advance-data (unwrap! (map-get? advance-history { employee: employee, advance-id: advance-id }) err-no-advance-to-repay))
+    )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (get repaid advance-data)) err-no-advance-to-repay)
+    
+    ;; Update repayment date
+    (map-set advance-history
+      { employee: employee, advance-id: advance-id }
+      (merge advance-data { repayment-date: repayment-date })
+    )
+    
+    (ok true)
+  )
+)
+
+
+(define-map employee-limits
+  { address: principal }
+  { advance-limit-percentage: uint }
+)
+
+(define-public (set-employee-limit (employee principal) (limit-percentage uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? employees { address: employee })) err-not-registered)
+    (asserts! (<= limit-percentage u100) err-invalid-amount)
+    
+    (map-set employee-limits
+      { address: employee }
+      { advance-limit-percentage: limit-percentage }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-employee-limit (employee principal))
+  (default-to u50 
+    (get advance-limit-percentage 
+      (map-get? employee-limits { address: employee })))
+)
