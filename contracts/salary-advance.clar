@@ -17,6 +17,11 @@
 (define-data-var total-repayments uint u0)
 (define-data-var payday-timestamp uint u0)
 
+(define-constant performance-excellent u80)
+(define-constant performance-good u65)
+(define-constant performance-average u50)
+(define-constant performance-poor u30)
+
 (define-map employees 
   { address: principal }
   {
@@ -25,6 +30,17 @@
     total-advances: uint,
     total-repayments: uint,
     active: bool
+  }
+)
+
+(define-map employee-performance
+  { address: principal }
+  {
+    on-time-repayments: uint,
+    late-repayments: uint,
+    total-repayments: uint,
+    performance-score: uint,
+    dynamic-limit: uint
   }
 )
 
@@ -346,3 +362,122 @@
     (get advance-limit-percentage 
       (map-get? employee-limits { address: employee })))
 )
+
+
+
+(define-private (calculate-performance-score (on-time uint) (late uint) (total uint))
+  (if (is-eq total u0)
+    u50
+    (let ((on-time-percentage (/ (* on-time u100) total)))
+      (if (>= on-time-percentage u90)
+        performance-excellent
+        (if (>= on-time-percentage u75)
+          performance-good
+          (if (>= on-time-percentage u60)
+            performance-average
+            performance-poor))))))
+
+(define-public (initialize-employee-performance (employee principal))
+  (begin
+    (asserts! (is-some (map-get? employees { address: employee })) err-not-registered)
+    (asserts! (is-none (map-get? employee-performance { address: employee })) err-already-registered)
+    
+    (map-set employee-performance
+      { address: employee }
+      {
+        on-time-repayments: u0,
+        late-repayments: u0,
+        total-repayments: u0,
+        performance-score: u50,
+        dynamic-limit: u50
+      })
+    (ok true)))
+
+(define-public (update-repayment-performance (employee principal) (is-on-time bool))
+  (let ((perf-data (default-to 
+                     { on-time-repayments: u0, late-repayments: u0, total-repayments: u0, performance-score: u50, dynamic-limit: u50 }
+                     (map-get? employee-performance { address: employee }))))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (let ((new-on-time (if is-on-time (+ (get on-time-repayments perf-data) u1) (get on-time-repayments perf-data)))
+          (new-late (if is-on-time (get late-repayments perf-data) (+ (get late-repayments perf-data) u1)))
+          (new-total (+ (get total-repayments perf-data) u1)))
+      
+      (let ((new-score (calculate-performance-score new-on-time new-late new-total)))
+        (map-set employee-performance
+          { address: employee }
+          {
+            on-time-repayments: new-on-time,
+            late-repayments: new-late,
+            total-repayments: new-total,
+            performance-score: new-score,
+            dynamic-limit: new-score
+          })
+        (ok new-score)))))
+
+(define-read-only (get-employee-performance (employee principal))
+  (map-get? employee-performance { address: employee }))
+
+(define-read-only (get-dynamic-advance-limit (employee principal))
+  (let ((employee-data (map-get? employees { address: employee }))
+        (perf-data (map-get? employee-performance { address: employee })))
+    (if (and (is-some employee-data) (is-some perf-data))
+      (let ((salary (get salary (unwrap-panic employee-data)))
+            (limit-percentage (get dynamic-limit (unwrap-panic perf-data))))
+        (/ (* salary limit-percentage) u100))
+      u0)))
+
+(define-public (request-performance-based-advance (amount uint))
+  (let ((employee-data (unwrap! (map-get? employees { address: tx-sender }) err-not-registered))
+        (max-advance (get-dynamic-advance-limit tx-sender))
+        (payday (var-get payday-timestamp)))
+    
+    (asserts! (> payday u0) err-payday-not-set)
+    (asserts! (is-none (map-get? advances { employee: tx-sender })) err-advance-exists)
+    (asserts! (<= amount max-advance) err-advance-limit-reached)
+    (asserts! (> amount u0) err-invalid-amount)
+    
+    (let ((employer-data (unwrap! (map-get? employer-funds { employer: contract-owner }) err-insufficient-balance))
+          (employer-balance (get balance employer-data)))
+      
+      (asserts! (>= employer-balance amount) err-insufficient-balance)
+      
+      (map-set employer-funds 
+        { employer: contract-owner } 
+        { balance: (- employer-balance amount) })
+      
+      (map-set advances
+        { employee: tx-sender }
+        {
+          amount: amount,
+          timestamp: stacks-block-height,
+          repaid: false,
+          due-date: payday
+        })
+      
+      (map-set employees
+        { address: tx-sender }
+        (merge employee-data 
+          { total-advances: (+ (get total-advances employee-data) u1) }))
+      
+      (var-set total-advances (+ (var-get total-advances) u1))
+      (ok amount))))
+
+(define-read-only (get-employee-advance-capacity (employee principal))
+  (let ((employee-data (map-get? employees { address: employee }))
+        (advance-data (map-get? advances { employee: employee }))
+        (perf-data (map-get? employee-performance { address: employee })))
+    
+    (if (and (is-some employee-data) (is-none advance-data))
+      {
+        max-advance: (get-dynamic-advance-limit employee),
+        performance-score: (if (is-some perf-data) (get performance-score (unwrap-panic perf-data)) u50),
+        limit-percentage: (if (is-some perf-data) (get dynamic-limit (unwrap-panic perf-data)) u50),
+        can-request: true
+      }
+      {
+        max-advance: u0,
+        performance-score: u0,
+        limit-percentage: u0,
+        can-request: false
+      })))
