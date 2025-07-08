@@ -22,6 +22,57 @@
 (define-constant performance-average u50)
 (define-constant performance-poor u30)
 
+(define-constant err-installment-not-found (err u111))
+(define-constant err-installment-already-paid (err u112))
+(define-constant err-invalid-installment-count (err u113))
+(define-constant err-installment-amount-mismatch (err u114))
+(define-constant err-installment-plan-exists (err u115))
+(define-constant err-no-installment-plan (err u116))
+(define-constant err-installment-overdue (err u117))
+(define-constant err-minimum-installment-amount (err u118))
+
+(define-data-var installment-plan-counter uint u0)
+(define-data-var total-installment-plans uint u0)
+(define-data-var total-installment-payments uint u0)
+
+(define-map installment-plans
+  { employee: principal, plan-id: uint }
+  {
+    total-amount: uint,
+    installment-count: uint,
+    installment-amount: uint,
+    payments-made: uint,
+    remaining-balance: uint,
+    created-at: uint,
+    next-payment-due: uint,
+    payment-frequency: uint,
+    status: (string-ascii 20),
+    late-payment-penalty: uint,
+    total-penalty-paid: uint
+  }
+)
+
+(define-map installment-payments
+  { employee: principal, plan-id: uint, payment-id: uint }
+  {
+    amount: uint,
+    payment-date: uint,
+    penalty-amount: uint,
+    was-late: bool,
+    due-date: uint
+  }
+)
+
+(define-map employee-installment-settings
+  { address: principal }
+  {
+    max-installment-plans: uint,
+    preferred-frequency: uint,
+    auto-deduct: bool,
+    penalty-rate: uint
+  }
+)
+
 (define-map employees 
   { address: principal }
   {
@@ -481,3 +532,347 @@
         limit-percentage: u0,
         can-request: false
       })))
+
+
+
+(define-public (create-installment-plan (total-amount uint) (installment-count uint) (payment-frequency uint))
+  (let
+    (
+      (employee-data (unwrap! (map-get? employees { address: tx-sender }) err-not-registered))
+      (salary (get salary employee-data))
+      (max-advance (get-dynamic-advance-limit tx-sender))
+      (current-counter (var-get installment-plan-counter))
+      (new-counter (+ current-counter u1))
+      (installment-amount (/ total-amount installment-count))
+      (next-payment-due (+ stacks-block-height payment-frequency))
+    )
+    (asserts! (> total-amount u0) err-invalid-amount)
+    (asserts! (and (>= installment-count u2) (<= installment-count u12)) err-invalid-installment-count)
+    (asserts! (<= total-amount max-advance) err-advance-limit-reached)
+    (asserts! (>= installment-amount u100) err-minimum-installment-amount)
+    (asserts! (> payment-frequency u0) err-invalid-amount)
+    (asserts! (is-none (map-get? advances { employee: tx-sender })) err-advance-exists)
+    
+    (let
+      (
+        (employer-data (unwrap! (map-get? employer-funds { employer: contract-owner }) err-insufficient-balance))
+        (employer-balance (get balance employer-data))
+      )
+      (asserts! (>= employer-balance total-amount) err-insufficient-balance)
+      
+      (map-set employer-funds 
+        { employer: contract-owner } 
+        { balance: (- employer-balance total-amount) })
+      
+      (map-set installment-plans
+        { employee: tx-sender, plan-id: new-counter }
+        {
+          total-amount: total-amount,
+          installment-count: installment-count,
+          installment-amount: installment-amount,
+          payments-made: u0,
+          remaining-balance: total-amount,
+          created-at: stacks-block-height,
+          next-payment-due: next-payment-due,
+          payment-frequency: payment-frequency,
+          status: "active",
+          late-payment-penalty: (/ total-amount u100),
+          total-penalty-paid: u0
+        }
+      )
+      
+      (map-set advances
+        { employee: tx-sender }
+        {
+          amount: total-amount,
+          timestamp: stacks-block-height,
+          repaid: false,
+          due-date: (+ stacks-block-height (* payment-frequency installment-count))
+        }
+      )
+      
+      (map-set employees
+        { address: tx-sender }
+        (merge employee-data 
+          { total-advances: (+ (get total-advances employee-data) u1) })
+      )
+      
+      (var-set installment-plan-counter new-counter)
+      (var-set total-installment-plans (+ (var-get total-installment-plans) u1))
+      (var-set total-advances (+ (var-get total-advances) u1))
+      
+      (ok new-counter)
+    )
+  )
+)
+
+(define-public (make-installment-payment (plan-id uint) (payment-amount uint))
+  (let
+    (
+      (plan-data (unwrap! (map-get? installment-plans { employee: tx-sender, plan-id: plan-id }) err-no-installment-plan))
+      (expected-amount (get installment-amount plan-data))
+      (remaining-balance (get remaining-balance plan-data))
+      (payments-made (get payments-made plan-data))
+      (installment-count (get installment-count plan-data))
+      (next-payment-due (get next-payment-due plan-data))
+      (payment-frequency (get payment-frequency plan-data))
+      (late-penalty (get late-payment-penalty plan-data))
+    )
+    (asserts! (is-eq (get status plan-data) "active") err-no-installment-plan)
+    (asserts! (> payment-amount u0) err-invalid-amount)
+    (asserts! (<= payment-amount remaining-balance) err-invalid-amount)
+    
+    (let
+      (
+        (is-late (> stacks-block-height next-payment-due))
+        (penalty-amount (if is-late late-penalty u0))
+        (total-payment (+ payment-amount penalty-amount))
+        (new-payments-made (+ payments-made u1))
+        (new-remaining-balance (- remaining-balance payment-amount))
+        (new-next-payment-due (+ next-payment-due payment-frequency))
+        (is-final-payment (is-eq new-payments-made installment-count))
+        (new-status (if is-final-payment "completed" "active"))
+      )
+      
+      (map-set installment-payments
+        { employee: tx-sender, plan-id: plan-id, payment-id: new-payments-made }
+        {
+          amount: payment-amount,
+          payment-date: stacks-block-height,
+          penalty-amount: penalty-amount,
+          was-late: is-late,
+          due-date: next-payment-due
+        }
+      )
+      
+      (map-set installment-plans
+        { employee: tx-sender, plan-id: plan-id }
+        (merge plan-data
+          {
+            payments-made: new-payments-made,
+            remaining-balance: new-remaining-balance,
+            next-payment-due: (if is-final-payment u0 new-next-payment-due),
+            status: new-status,
+            total-penalty-paid: (+ (get total-penalty-paid plan-data) penalty-amount)
+          }
+        )
+      )
+      
+      (let
+        (
+          (employer-data (default-to { balance: u0 } (map-get? employer-funds { employer: contract-owner })))
+          (employer-balance (get balance employer-data))
+        )
+        (map-set employer-funds
+          { employer: contract-owner }
+          { balance: (+ employer-balance total-payment) }
+        )
+      )
+      
+      (if is-final-payment
+        (let
+          (
+            (advance-data (unwrap! (map-get? advances { employee: tx-sender }) err-no-advance-to-repay))
+            (employee-data (unwrap! (map-get? employees { address: tx-sender }) err-not-registered))
+          )
+          (map-set advances
+            { employee: tx-sender }
+            (merge advance-data { repaid: true })
+          )
+          
+          (map-set employees
+            { address: tx-sender }
+            (merge employee-data 
+              { total-repayments: (+ (get total-repayments employee-data) u1) })
+          )
+          
+          (var-set total-repayments (+ (var-get total-repayments) u1))
+          (ok "plan-completed")
+        )
+        (begin
+          (var-set total-installment-payments (+ (var-get total-installment-payments) u1))
+          (ok "payment-processed")
+        )
+      )
+    )
+  )
+)
+
+(define-public (update-installment-settings (max-plans uint) (preferred-frequency uint) (auto-deduct bool) (penalty-rate uint))
+  (begin
+    (asserts! (is-some (map-get? employees { address: tx-sender })) err-not-registered)
+    (asserts! (and (>= max-plans u1) (<= max-plans u5)) err-invalid-amount)
+    (asserts! (> preferred-frequency u0) err-invalid-amount)
+    (asserts! (<= penalty-rate u10) err-invalid-amount)
+    
+    (map-set employee-installment-settings
+      { address: tx-sender }
+      {
+        max-installment-plans: max-plans,
+        preferred-frequency: preferred-frequency,
+        auto-deduct: auto-deduct,
+        penalty-rate: penalty-rate
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (force-installment-payment (employee principal) (plan-id uint) (payment-amount uint))
+  (let
+    (
+      (plan-data (unwrap! (map-get? installment-plans { employee: employee, plan-id: plan-id }) err-no-installment-plan))
+      (remaining-balance (get remaining-balance plan-data))
+      (payments-made (get payments-made plan-data))
+      (installment-count (get installment-count plan-data))
+      (next-payment-due (get next-payment-due plan-data))
+      (payment-frequency (get payment-frequency plan-data))
+      (late-penalty (get late-payment-penalty plan-data))
+    )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-eq (get status plan-data) "active") err-no-installment-plan)
+    (asserts! (>= stacks-block-height next-payment-due) err-repayment-not-due)
+    (asserts! (<= payment-amount remaining-balance) err-invalid-amount)
+    
+    (let
+      (
+        (penalty-amount late-penalty)
+        (total-payment (+ payment-amount penalty-amount))
+        (new-payments-made (+ payments-made u1))
+        (new-remaining-balance (- remaining-balance payment-amount))
+        (new-next-payment-due (+ next-payment-due payment-frequency))
+        (is-final-payment (is-eq new-payments-made installment-count))
+        (new-status (if is-final-payment "completed" "active"))
+      )
+      
+      (map-set installment-payments
+        { employee: employee, plan-id: plan-id, payment-id: new-payments-made }
+        {
+          amount: payment-amount,
+          payment-date: stacks-block-height,
+          penalty-amount: penalty-amount,
+          was-late: true,
+          due-date: next-payment-due
+        }
+      )
+      
+      (map-set installment-plans
+        { employee: employee, plan-id: plan-id }
+        (merge plan-data
+          {
+            payments-made: new-payments-made,
+            remaining-balance: new-remaining-balance,
+            next-payment-due: (if is-final-payment u0 new-next-payment-due),
+            status: new-status,
+            total-penalty-paid: (+ (get total-penalty-paid plan-data) penalty-amount)
+          }
+        )
+      )
+      
+      (let
+        (
+          (employer-data (default-to { balance: u0 } (map-get? employer-funds { employer: contract-owner })))
+          (employer-balance (get balance employer-data))
+        )
+        (map-set employer-funds
+          { employer: contract-owner }
+          { balance: (+ employer-balance total-payment) }
+        )
+      )
+      
+      (if is-final-payment
+        (let
+          (
+            (advance-data (unwrap! (map-get? advances { employee: employee }) err-no-advance-to-repay))
+            (employee-data (unwrap! (map-get? employees { address: employee }) err-not-registered))
+          )
+          (map-set advances
+            { employee: employee }
+            (merge advance-data { repaid: true })
+          )
+          
+          (map-set employees
+            { address: employee }
+            (merge employee-data 
+              { total-repayments: (+ (get total-repayments employee-data) u1) })
+          )
+          
+          (var-set total-repayments (+ (var-get total-repayments) u1))
+          (ok "plan-completed")
+        )
+        (begin
+          (var-set total-installment-payments (+ (var-get total-installment-payments) u1))
+          (ok "payment-processed")
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-installment-plan (employee principal) (plan-id uint))
+  (map-get? installment-plans { employee: employee, plan-id: plan-id })
+)
+
+(define-read-only (get-installment-payment (employee principal) (plan-id uint) (payment-id uint))
+  (map-get? installment-payments { employee: employee, plan-id: plan-id, payment-id: payment-id })
+)
+
+(define-read-only (get-employee-installment-settings (employee principal))
+  (default-to 
+    { max-installment-plans: u3, preferred-frequency: u100, auto-deduct: false, penalty-rate: u1 }
+    (map-get? employee-installment-settings { address: employee })
+  )
+)
+
+(define-read-only (get-installment-stats)
+  {
+    total-installment-plans: (var-get total-installment-plans),
+    total-installment-payments: (var-get total-installment-payments),
+    current-plan-counter: (var-get installment-plan-counter)
+  }
+)
+
+(define-read-only (calculate-installment-schedule (total-amount uint) (installment-count uint) (payment-frequency uint))
+  (let
+    (
+      (installment-amount (/ total-amount installment-count))
+      (total-duration (* installment-count payment-frequency))
+      (final-payment-adjustment (- total-amount (* installment-amount installment-count)))
+    )
+    {
+      installment-amount: installment-amount,
+      total-duration: total-duration,
+      final-payment-amount: (+ installment-amount final-payment-adjustment),
+      estimated-completion: (+ stacks-block-height total-duration)
+    }
+  )
+)
+
+(define-read-only (get-overdue-installments (employee principal) (plan-id uint))
+  (let
+    (
+      (plan-data (map-get? installment-plans { employee: employee, plan-id: plan-id }))
+    )
+    (if (is-some plan-data)
+      (let
+        (
+          (plan (unwrap-panic plan-data))
+          (next-due (get next-payment-due plan))
+          (is-overdue (and (> stacks-block-height next-due) (is-eq (get status plan) "active")))
+        )
+        {
+          is-overdue: is-overdue,
+          days-overdue: (if is-overdue (- stacks-block-height next-due) u0),
+          penalty-amount: (if is-overdue (get late-payment-penalty plan) u0),
+          remaining-balance: (get remaining-balance plan)
+        }
+      )
+      {
+        is-overdue: false,
+        days-overdue: u0,
+        penalty-amount: u0,
+        remaining-balance: u0
+      }
+    )
+  )
+)
