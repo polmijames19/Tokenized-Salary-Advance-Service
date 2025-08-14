@@ -876,3 +876,376 @@
     )
   )
 )
+
+;; Credit Score System Constants
+(define-constant err-credit-score-not-found (err u119))
+(define-constant err-invalid-credit-score (err u120))
+(define-constant err-credit-assessment-failed (err u121))
+(define-constant err-insufficient-credit-history (err u122))
+
+;; Credit score ranges and thresholds
+(define-constant credit-score-excellent u850)
+(define-constant credit-score-very-good u740)
+(define-constant credit-score-good u670)
+(define-constant credit-score-fair u580)
+(define-constant credit-score-poor u300)
+
+(define-data-var credit-assessment-counter uint u0)
+
+;; Employee credit profiles with comprehensive scoring
+(define-map employee-credit-profiles
+  { address: principal }
+  {
+    current-score: uint,
+    score-history-count: uint,
+    salary-to-advance-ratio: uint,
+    payment-consistency-score: uint,
+    advance-frequency-score: uint,
+    tenure-bonus: uint,
+    risk-factor: uint,
+    last-assessment: uint,
+    credit-limit-multiplier: uint,
+    interest-rate-modifier: uint
+  }
+)
+
+;; Historical credit score tracking
+(define-map credit-score-history
+  { employee: principal, assessment-id: uint }
+  {
+    score: uint,
+    assessment-date: uint,
+    factors: {
+      salary-stability: uint,
+      payment-history: uint,
+      advance-pattern: uint,
+      tenure: uint,
+      performance: uint
+    },
+    recommendations: (string-ascii 200),
+    trend: (string-ascii 20)
+  }
+)
+
+;; Credit score factors and weights
+(define-map credit-scoring-factors
+  { factor-type: (string-ascii 30) }
+  {
+    weight: uint,
+    max-score: uint,
+    min-score: uint,
+    description: (string-ascii 100)
+  }
+)
+
+;; Initialize credit scoring system with default factors
+(define-public (initialize-credit-system)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    ;; Set up scoring factors with weights
+    (map-set credit-scoring-factors 
+      { factor-type: "salary-stability" }
+      { weight: u30, max-score: u300, min-score: u0, description: "Consistent salary payments and job tenure" })
+    
+    (map-set credit-scoring-factors 
+      { factor-type: "payment-history" }
+      { weight: u35, max-score: u350, min-score: u0, description: "On-time advance repayments and consistency" })
+    
+    (map-set credit-scoring-factors 
+      { factor-type: "advance-pattern" }
+      { weight: u20, max-score: u200, min-score: u0, description: "Responsible advance usage patterns" })
+    
+    (map-set credit-scoring-factors 
+      { factor-type: "tenure" }
+      { weight: u10, max-score: u100, min-score: u0, description: "Length of employment relationship" })
+    
+    (map-set credit-scoring-factors 
+      { factor-type: "performance" }
+      { weight: u5, max-score: u50, min-score: u0, description: "Employee performance metrics" })
+    
+    (ok true)
+  )
+)
+
+;; Calculate comprehensive credit score
+(define-public (calculate-credit-score (employee principal))
+  (let
+    (
+      (employee-data (unwrap! (map-get? employees { address: employee }) err-not-registered))
+      (perf-data (map-get? employee-performance { address: employee }))
+      (current-counter (var-get credit-assessment-counter))
+      (new-counter (+ current-counter u1))
+    )
+    
+    ;; Calculate individual scoring factors
+    (let
+      (
+        (salary-score (calculate-salary-stability-score employee employee-data))
+        (payment-score (calculate-payment-history-score employee perf-data))
+        (advance-score (calculate-advance-pattern-score employee employee-data))
+        (tenure-score (calculate-tenure-score employee-data))
+        (performance-score (calculate-performance-factor-score perf-data))
+        (total-score (+ salary-score (+ payment-score (+ advance-score (+ tenure-score performance-score)))))
+      )
+      
+      ;; Calculate additional metrics
+      (let
+        (
+          (salary-ratio (calculate-salary-to-advance-ratio employee-data))
+          (consistency-score (if (is-some perf-data) 
+                              (get performance-score (unwrap-panic perf-data)) u50))
+          (frequency-score (calculate-advance-frequency-score employee-data))
+          (tenure-bonus (/ tenure-score u10))
+          (risk-factor (calculate-risk-factor total-score))
+          (credit-multiplier (calculate-credit-limit-multiplier total-score))
+          (interest-modifier (calculate-interest-rate-modifier total-score))
+        )
+        
+        ;; Update employee credit profile
+        (map-set employee-credit-profiles
+          { address: employee }
+          {
+            current-score: total-score,
+            score-history-count: (+ (default-to u0 
+              (get score-history-count (map-get? employee-credit-profiles { address: employee }))) u1),
+            salary-to-advance-ratio: salary-ratio,
+            payment-consistency-score: consistency-score,
+            advance-frequency-score: frequency-score,
+            tenure-bonus: tenure-bonus,
+            risk-factor: risk-factor,
+            last-assessment: stacks-block-height,
+            credit-limit-multiplier: credit-multiplier,
+            interest-rate-modifier: interest-modifier
+          }
+        )
+        
+        ;; Record credit score history
+        (map-set credit-score-history
+          { employee: employee, assessment-id: new-counter }
+          {
+            score: total-score,
+            assessment-date: stacks-block-height,
+            factors: {
+              salary-stability: salary-score,
+              payment-history: payment-score,
+              advance-pattern: advance-score,
+              tenure: tenure-score,
+              performance: performance-score
+            },
+            recommendations: (generate-credit-recommendations total-score),
+            trend: (determine-credit-trend employee total-score)
+          }
+        )
+        
+        (var-set credit-assessment-counter new-counter)
+        (ok total-score)
+      )
+    )
+  )
+)
+
+;; Calculate salary stability score based on tenure and salary consistency
+(define-private (calculate-salary-stability-score (employee principal) (employee-data { salary: uint, registered-at: uint, total-advances: uint, total-repayments: uint, active: bool }))
+  (let
+    (
+      (tenure-blocks (- stacks-block-height (get registered-at employee-data)))
+      (salary (get salary employee-data))
+      (base-score u150)
+    )
+    ;; Higher salary and longer tenure increase stability score
+    (+ base-score 
+       (/ tenure-blocks u1000) 
+       (/ salary u10000))
+  )
+)
+
+;; Calculate payment history score based on repayment behavior
+(define-private (calculate-payment-history-score (employee principal) (perf-data (optional { on-time-repayments: uint, late-repayments: uint, total-repayments: uint, performance-score: uint, dynamic-limit: uint })))
+  (if (is-some perf-data)
+    (let
+      (
+        (perf (unwrap-panic perf-data))
+        (on-time (get on-time-repayments perf))
+        (total (get total-repayments perf))
+        (base-score u175)
+      )
+      (if (> total u0)
+        (+ base-score (/ (* on-time u150) total))
+        base-score
+      )
+    )
+    u175 ;; Default score for new employees
+  )
+)
+
+;; Calculate advance pattern score based on responsible usage
+(define-private (calculate-advance-pattern-score (employee principal) (employee-data { salary: uint, registered-at: uint, total-advances: uint, total-repayments: uint, active: bool }))
+  (let
+    (
+      (employee-advances (get total-advances employee-data))
+      (salary (get salary employee-data))
+      (base-score u100)
+    )
+    ;; Reward moderate usage relative to salary
+    (if (> employee-advances u0)
+      (let ((usage-ratio (/ (* employee-advances u100) salary)))
+        (if (<= usage-ratio u10)
+          (+ base-score u90) ;; Excellent usage
+          (if (<= usage-ratio u25)
+            (+ base-score u60) ;; Good usage
+            (+ base-score u30)))) ;; Fair usage
+      (+ base-score u50) ;; No usage yet
+    )
+  )
+)
+
+;; Calculate tenure score based on employment length
+(define-private (calculate-tenure-score (employee-data { salary: uint, registered-at: uint, total-advances: uint, total-repayments: uint, active: bool }))
+  (let
+    (
+      (tenure-blocks (- stacks-block-height (get registered-at employee-data)))
+      (base-score u25)
+    )
+    ;; Reward longer tenure
+    (+ base-score (/ tenure-blocks u2000))
+  )
+)
+
+;; Calculate performance factor score
+(define-private (calculate-performance-factor-score (perf-data (optional { on-time-repayments: uint, late-repayments: uint, total-repayments: uint, performance-score: uint, dynamic-limit: uint })))
+  (if (is-some perf-data)
+    (/ (get performance-score (unwrap-panic perf-data)) u2)
+    u25
+  )
+)
+
+;; Calculate salary to advance ratio
+(define-private (calculate-salary-to-advance-ratio (employee-data { salary: uint, registered-at: uint, total-advances: uint, total-repayments: uint, active: bool }))
+  (let
+    (
+      (salary (get salary employee-data))
+      (total-advances-count (get total-advances employee-data))
+    )
+    (if (> total-advances-count u0)
+      (/ salary total-advances-count)
+      salary
+    )
+  )
+)
+
+;; Calculate advance frequency score
+(define-private (calculate-advance-frequency-score (employee-data { salary: uint, registered-at: uint, total-advances: uint, total-repayments: uint, active: bool }))
+  (let
+    (
+      (tenure-blocks (- stacks-block-height (get registered-at employee-data)))
+      (advance-count (get total-advances employee-data))
+    )
+    (if (> tenure-blocks u0)
+      (let ((frequency (/ advance-count tenure-blocks)))
+        (if (<= frequency u1) u90 ;; Excellent frequency
+          (if (<= frequency u3) u70 ;; Good frequency
+            u40))) ;; High frequency
+      u50
+    )
+  )
+)
+
+;; Calculate risk factor based on total score
+(define-private (calculate-risk-factor (total-score uint))
+  (if (>= total-score credit-score-very-good) u10 ;; Low risk
+    (if (>= total-score credit-score-good) u25 ;; Medium-low risk
+      (if (>= total-score credit-score-fair) u50 ;; Medium risk
+        u80))) ;; High risk
+)
+
+;; Calculate credit limit multiplier based on score
+(define-private (calculate-credit-limit-multiplier (total-score uint))
+  (if (>= total-score credit-score-excellent) u200 ;; 2x multiplier
+    (if (>= total-score credit-score-very-good) u150 ;; 1.5x multiplier
+      (if (>= total-score credit-score-good) u120 ;; 1.2x multiplier
+        (if (>= total-score credit-score-fair) u100 ;; 1x multiplier
+          u80)))) ;; 0.8x multiplier
+)
+
+;; Calculate interest rate modifier based on score
+(define-private (calculate-interest-rate-modifier (total-score uint))
+  (if (>= total-score credit-score-excellent) u50 ;; 50% of base rate
+    (if (>= total-score credit-score-very-good) u75 ;; 75% of base rate
+      (if (>= total-score credit-score-good) u100 ;; 100% of base rate
+        (if (>= total-score credit-score-fair) u125 ;; 125% of base rate
+          u150)))) ;; 150% of base rate
+)
+
+;; Generate credit improvement recommendations
+(define-private (generate-credit-recommendations (score uint))
+  (if (>= score credit-score-very-good)
+    "Excellent credit! Continue consistent repayment patterns"
+    (if (>= score credit-score-good)
+      "Good credit. Focus on reducing advance frequency for improvement"
+      (if (>= score credit-score-fair)
+        "Fair credit. Improve on-time payments and reduce advance amounts"
+        "Poor credit. Focus on timely repayments and stable employment")))
+)
+
+;; Determine credit trend based on historical data
+(define-private (determine-credit-trend (employee principal) (current-score uint))
+  (let
+    (
+      (profile (map-get? employee-credit-profiles { address: employee }))
+    )
+    (if (is-some profile)
+      (let
+        (
+          (history-count (get score-history-count (unwrap-panic profile)))
+        )
+        (if (> history-count u1)
+          "stable" ;; Could implement more sophisticated trending
+          "new"))
+      "new")
+  )
+)
+
+;; Get credit-based advance limit for employee
+(define-public (get-credit-based-advance-limit (employee principal))
+  (let
+    (
+      (employee-data (map-get? employees { address: employee }))
+      (credit-profile (map-get? employee-credit-profiles { address: employee }))
+    )
+    (if (and (is-some employee-data) (is-some credit-profile))
+      (let
+        (
+          (salary (get salary (unwrap-panic employee-data)))
+          (multiplier (get credit-limit-multiplier (unwrap-panic credit-profile)))
+          (base-limit (/ salary u2))
+        )
+        (ok (/ (* base-limit multiplier) u100))
+      )
+      err-credit-score-not-found
+    )
+  )
+)
+
+;; Read-only functions for credit data access
+(define-read-only (get-employee-credit-profile (employee principal))
+  (map-get? employee-credit-profiles { address: employee })
+)
+
+(define-read-only (get-credit-score-history (employee principal) (assessment-id uint))
+  (map-get? credit-score-history { employee: employee, assessment-id: assessment-id })
+)
+
+(define-read-only (get-credit-scoring-factor (factor-type (string-ascii 30)))
+  (map-get? credit-scoring-factors { factor-type: factor-type })
+)
+
+(define-read-only (get-credit-assessment-stats)
+  {
+    total-assessments: (var-get credit-assessment-counter),
+    system-initialized: (is-some (map-get? credit-scoring-factors { factor-type: "salary-stability" }))
+  }
+)
+
+
+  
