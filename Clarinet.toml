@@ -9,6 +9,10 @@ requirements = []
 path = 'contracts/salary-advance.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.AdvancePredictor]
+path = 'contracts/AdvancePredictor.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
